@@ -41,6 +41,15 @@ def _mkdir_p(path):
             raise
 
 
+# We do not aim to wrap every os-specific exception.
+# Here we define only the most common one,
+# otherwise caller would need to catch os-specific persistence exceptions.
+class PersistenceNotFound(OSError):
+    def __init__(
+            self, err_no=errno.ENOENT, message="Persistence not found", where=None):
+        super(PersistenceNotFound, self).__init__(err_no, message, where)
+
+
 class BasePersistence(ABC):
     """An abstract persistence defining the common interface of this family"""
 
@@ -57,7 +66,7 @@ class BasePersistence(ABC):
         # type: () -> str
         """Load content from this persistence.
 
-        Could raise IOError if no save() was called before.
+        Could raise PersistenceNotFound if no save() was called before.
         """
         raise NotImplementedError
 
@@ -65,7 +74,7 @@ class BasePersistence(ABC):
     def time_last_modified(self):
         """Get the last time when this persistence has been modified.
 
-        Could raise IOError if no save() was called before.
+        Could raise PersistenceNotFound if no save() was called before.
         """
         raise NotImplementedError
 
@@ -97,7 +106,17 @@ class FilePersistence(BasePersistence):
             return handle.read()
 
     def time_last_modified(self):
-        return os.path.getmtime(self._location)
+        try:
+            return os.path.getmtime(self._location)
+        except IOError as exp:
+            if exp.errno == errno.ENOENT:
+                raise PersistenceNotFound(
+                    message=(
+                        "Persistence not initialized. "
+                        "You can recover by calling a save() first."),
+                    where=self._location,
+                    )
+            raise
 
     def touch(self):
         """To touch this file-based persistence without writing content into it"""
@@ -165,9 +184,13 @@ class KeychainPersistence(BasePersistence):
             except self._KeychainError as ex:
                 if ex.exit_status == self._KeychainError.ITEM_NOT_FOUND:
                     # This happens when a load() is called before a save().
-                    # We map it to cross-platform IOError for unified catching.
-                    raise IOError(errno.ENOENT, "Content is empty", "%s %s".format(
-                        self._service_name, self._account_name))
+                    # We map it into cross-platform error for unified catching.
+                    raise PersistenceNotFound(
+                        where="%s %s".format(self._service_name, self._account_name),
+                        message=(
+                            "Keychain persistence not initialized. "
+                            "You can recover by call a save() first."),
+                        )
                 raise  # We do not intend to hide any other underlying exceptions
 
     def time_last_modified(self):
@@ -208,8 +231,10 @@ class LibsecretPersistence(BasePersistence):
         data = self._agent.load()
         if data is None:
             # Lower level libsecret would return None when found nothing. Here
-            # in persistence layer, we convert it to an IOError for consistence.
-            raise IOError(errno.ENOENT, "Content is empty")
+            # in persistence layer, we convert it to a unified error for consistence.
+            raise PersistenceNotFound(message=(
+                "Keyring persistence not initialized. "
+                "You can recover by call a save() first."))
         return data
 
     def time_last_modified(self):
